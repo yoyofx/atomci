@@ -287,7 +287,6 @@
     },
     methods: {
       tabClick(val) {
-        console.info(val.name);
         this.activeName = val.name;
         this.getList();
       },
@@ -309,13 +308,6 @@
             this.getList(true);
           });
         }).catch(() => { });
-      },
-      goPubDetail(type, id) {
-        window.open(
-          `//${window.location.host}/project/projectPubDetail/${this.$route.params.projectID}/${
-          this.$props.pubItem.id
-          }/${id}/${type}`
-        );
       },
       // 终止发布
       termination(id, stargid, name) {

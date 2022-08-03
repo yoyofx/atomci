@@ -115,21 +115,30 @@ func (pm *PipelineManager) generateCompileEnvParams(apps []*RunBuildAppReq) []co
 			logs.Warn("project app error: %s", err.Error())
 			continue
 		}
-
-		if projectApp.CompileEnvID == 0 {
-			log.Log.Debug("app: %v didnot setup complie env, use default docker runtime", projectApp.Name)
+		scmApp, err := pm.modelApp.GetScmAppByID(projectApp.ScmID)
+		if err != nil {
+			logs.Warn("get scm app error: %s", err.Error())
 			continue
 		}
-		compileItem, err := pm.settingsHandler.GetCompileEnvByID(projectApp.CompileEnvID)
+
+		if scmApp.CompileEnvID == 0 {
+			log.Log.Debug("app: %v didnot setup complie env, use default docker runtime", scmApp.Name)
+			continue
+		}
+		compileItem, err := pm.settingsHandler.GetCompileEnvByID(scmApp.CompileEnvID)
 		if err != nil {
-			logs.Warn("get compile env by id:%v error: %s", projectApp.CompileEnvID, err.Error())
+			logs.Warn("get compile env by id:%v error: %s", scmApp.CompileEnvID, err.Error())
+		}
+		if compileItem.Name == constant.DefaultContainerName {
+			log.Log.Warn("app: %v setup complie env to %v, skip this compileItem generate", constant.DefaultContainerName, scmApp.Name)
+			continue
 		}
 		compileEnvItem := compileEnv{
 			Image:      compileItem.Image,
 			Args:       compileItem.Args,
 			Command:    compileItem.Command,
 			WorkingDir: "/home/jenkins/agent",
-			Name:       strings.ToLower(projectApp.Name),
+			Name:       strings.ToLower(scmApp.Name),
 		}
 		compileParams = append(compileParams, compileEnvItem)
 	}
@@ -259,12 +268,12 @@ func (pm *PipelineManager) CreateBuildJob(creator string, projectID, publishID i
 	}
 	jobName := fmt.Sprintf("atomci_%v_%v_%v", projectID, publishID, envStageJSON.StageID)
 
-	jenkinsJNLPTemplate, err := pm.getSysDefaultCompileEnv("jnlp")
+	jenkinsJNLPTemplate, err := pm.getSysDefaultCompileEnv(constant.DefaultContainerName)
 	if err != nil {
-		log.Log.Error("when create build job, get sys default jnlp compile env error: %s", err.Error())
+		log.Log.Error("when create build job, get sys default %v compile env error: %s", constant.DefaultContainerName, err.Error())
 		return 0, "", err
 	}
-	jenkinsKanikoTemplate, err := pm.getSysDefaultCompileEnv("kaniko")
+	jenkinsKanikoTemplate, err := pm.getSysDefaultCompileEnv(constant.BuildImageContainerName)
 	if err != nil {
 		log.Log.Error("when create build job, get sys default kaniko compile env  error: %s", err.Error())
 		return 0, "", err
@@ -344,18 +353,24 @@ func (pm *PipelineManager) CreateBuildJob(creator string, projectID, publishID i
 		log.Log.Error("when crate build job, get project app error: %s", err.Error())
 		return 0, "", err
 	}
-	repoModel, err := pm.modelApp.GetGitRepoByID(projectApp.RepoID)
+	scmApp, err := pm.modelApp.GetScmAppByID(projectApp.ScmID)
 	if err != nil {
-		log.Log.Error("get GetGitRepoByID occur error: %v", err.Error())
-		return 0, "", fmt.Errorf("网络错误，请重试")
+		log.Log.Error("when crate build job, get scm app error: %s", err.Error())
+		return 0, "", err
 	}
 
-	baseURL := strings.Replace(repoModel.BaseURL, "http://", "", -1)
+	scmIntegrateResp, err := pm.settingsHandler.GetSCMIntegrateSettinByID(scmApp.RepoID)
+	if err != nil {
+		log.Log.Error("when crate build job, get scm integrate setting error: %s", err.Error())
+		return 0, "", err
+	}
+
+	baseURL := strings.Replace(scmIntegrateResp.URL, "http://", "", -1)
 	baseURL = strings.Replace(baseURL, "https://", "", -1)
 	if strings.HasSuffix(baseURL, "/") {
 		baseURL = strings.Replace(baseURL, "/", "", -1)
 	}
-	repoConfStr := fmt.Sprintf("{\"%s\":[\"%s\",\"%s\"]}", baseURL, repoModel.User, repoModel.Token)
+	repoConfStr := fmt.Sprintf("{\"%s\":[\"%s\",\"%s\"]}", baseURL, scmIntegrateResp.User, scmIntegrateResp.Token)
 
 	adminToken, err := pm.getUserToken("admin")
 	if err != nil {
@@ -520,9 +535,9 @@ func (pm *PipelineManager) CreateDeployJob(creator string, projectID, publishID 
 		{Key: "USER_TOKEN", Value: userToken},
 	}
 
-	jenkinsJNLPTemplate, err := pm.getSysDefaultCompileEnv("jnlp")
+	jenkinsJNLPTemplate, err := pm.getSysDefaultCompileEnv(constant.DefaultContainerName)
 	if err != nil {
-		log.Log.Error("when create deploy job, get sys default jnlp compile env error: %s", err.Error())
+		log.Log.Error("when create deploy job, get sys default %v compile env error: %s", constant.DefaultContainerName, err.Error())
 		return 0, "", err
 	}
 
@@ -568,49 +583,20 @@ func (pm *PipelineManager) renderTemplateStr(apps []*RunDeployAppReq, publishID,
 			log.Log.Error("get app id: %v  env id: %v real arrange, occur error: %s", item.ProjectAppID, envID, err.Error())
 			continue
 		}
-		// TODO: write continue
-		imageMappings, err := pm.modelAppArrange.GetAppImageMappingByArrangeID(arrange.ID)
-		if err != nil {
-			log.Log.Error("get imagemapping error: %s", err.Error())
-			continue
-		}
+
 		// replace template str
 		arrangeConfig := arrange.Config
-		var newImageAddr string
-		for _, image := range imageMappings {
-			switch image.ImageTagType {
-			// TODO: multiple imageTagType, code combine
-			case models.SystemDefaultTag:
-				publishApp, err := pm.modelPublish.GetPublishAppByPublishIDAndAppID(publishID, item.ProjectAppID)
-				if err != nil {
-					logs.Warn("when get publish app by publishid/appid occur error:%s, did not update app arrange image info", err.Error())
-					continue
-				}
-				imageTag, err := pm.getAppCodeCommitByBranch(item.ProjectAppID, publishApp.BranchName)
-				if err != nil {
-					logs.Warn("when get app code commit by branch error: %s, did not update app arrange image info", err.Error())
-					continue
-				}
-
-				originImageSplit := strings.Split(image.Image, ":")
-				imageStr := image.Image
-				if len(originImageSplit) == 2 {
-					imageStr = originImageSplit[0]
-				}
-				newImageAddr = fmt.Sprintf("%s:%s", imageStr, imageTag)
-				arrangeConfig = strings.Replace(arrangeConfig, image.Image, newImageAddr, -1)
-			case models.LatestTag:
-				originImageSplit := strings.Split(image.Image, ":")
-				imageStr := image.Image
-				if len(originImageSplit) == 2 {
-					imageStr = originImageSplit[0]
-				}
-				newImageAddr = fmt.Sprintf("%s:%s", imageStr, "latest")
-				arrangeConfig = strings.Replace(arrangeConfig, image.Image, newImageAddr, -1)
-			case models.OriginTag:
-				log.Log.Debug("image tag use from yaml, no need replace")
-			}
+		publishApp, err := pm.modelPublish.GetPublishAppByPublishIDAndAppID(publishID, item.ProjectAppID)
+		if err != nil {
+			logs.Warn("when get publish app by publishid/appid occur error:%s, did not update app arrange image info", err.Error())
+			continue
 		}
+
+		newImageAddr, originImage, err := pm.generateImageAddr(arrange.ID, item.ProjectAppID, publishApp.BranchName)
+		if err != nil {
+			continue
+		}
+		arrangeConfig = strings.Replace(arrangeConfig, originImage, newImageAddr, -1)
 		if templateStr == "" {
 			templateStr = arrangeConfig
 		} else {
@@ -620,19 +606,59 @@ func (pm *PipelineManager) renderTemplateStr(apps []*RunDeployAppReq, publishID,
 	return templateStr, nil
 }
 
-func (pm *PipelineManager) getAppCodeCommitByBranch(appID int64, branchName string) (string, error) {
+func (pm *PipelineManager) generateImageAddr(arrangeID, projectAppID int64, branch string) (string, string, error) {
+	imageMapping, err := pm.modelAppArrange.GetAppImageMappingByArrangeIDAndProjectAppID(arrangeID, projectAppID)
+	if err != nil {
+		log.Log.Error("get imagemapping error: %s", err.Error())
+		return "", "", err
+	}
+	newImageAddr := imageMapping.Image
+	switch imageMapping.ImageTagType {
+	case models.SystemDefaultTag:
+		// branch get from RunBuildAppReq.Branch
+		imageTag, err := pm.GetAppCodeCommitByBranch(projectAppID, branch)
+		if err != nil {
+			logs.Error("when get app code commit by branch error: %s, did not update app arrange image info", err.Error())
+			return "", "", err
+		}
+
+		originImageSplit := strings.Split(imageMapping.Image, ":")
+		imageStr := imageMapping.Image
+		if len(originImageSplit) == 2 {
+			imageStr = originImageSplit[0]
+		}
+		newImageAddr = fmt.Sprintf("%s:%s", imageStr, imageTag)
+	case models.LatestTag:
+		originImageSplit := strings.Split(imageMapping.Image, ":")
+		imageStr := imageMapping.Image
+		if len(originImageSplit) == 2 {
+			imageStr = originImageSplit[0]
+		}
+		newImageAddr = fmt.Sprintf("%s:%s", imageStr, "latest")
+	case models.OriginTag:
+		log.Log.Debug("image tag use from yaml, no need replace")
+	}
+	return newImageAddr, imageMapping.Image, nil
+}
+
+func (pm *PipelineManager) GetAppCodeCommitByBranch(appID int64, branchName string) (string, error) {
 	projectApp, err := pm.modelProject.GetProjectApp(appID)
 	if err != nil {
 		log.Log.Error("when get app code commit, get project ap by id: %v error:%s", appID, err.Error())
 		return "", err
 	}
 
-	repoModel, err := pm.modelApp.GetRepoByID(projectApp.RepoID)
+	scmApp, err := pm.modelApp.GetScmAppByID(projectApp.ScmID)
 	if err != nil {
+		log.Log.Error("when get app code commit, get scm ap by id: %v error:%s", appID, err.Error())
 		return "", err
 	}
 
-	client, err := apps.NewScmProvider(repoModel.Type, repoModel.BaseURL, repoModel.Token)
+	scmIntegrateResp, err := pm.settingsHandler.GetSCMIntegrateSettinByID(scmApp.RepoID)
+	if err != nil {
+		return "", err
+	}
+	client, err := apps.NewScmProvider(scmIntegrateResp.Type, scmIntegrateResp.URL, scmIntegrateResp.Token)
 	if err != nil {
 		return "", err
 	}
@@ -642,7 +668,7 @@ func (pm *PipelineManager) getAppCodeCommitByBranch(appID int64, branchName stri
 		Size: 10,
 	}
 
-	got, _, err := client.Git.ListCommits(context.Background(), projectApp.FullName, opt)
+	got, _, err := client.Git.ListCommits(context.Background(), scmApp.FullName, opt)
 	if err != nil {
 		return "", err
 	}
@@ -650,8 +676,8 @@ func (pm *PipelineManager) getAppCodeCommitByBranch(appID int64, branchName stri
 	if len(got) > 0 {
 		return branchName + "-" + got[0].Sha[0:7], nil
 	} else {
-		logs.Warn("branch: %v did not include any commit, use latest tag", branchName)
-		return branchName + "-latest", nil
+		logs.Warn("branch: %v did not include any commit", branchName)
+		return "", fmt.Errorf("应用:%v 分支:%v 未包含任何提交, 请通过“我的应用”-“应用详情”-“同步远程分支”后重新选择", scmApp.Name, branchName)
 	}
 }
 
@@ -663,6 +689,11 @@ func (pm *PipelineManager) getPublishStepPreBranchList(projectID, publishID, sta
 	publishStepResp := []*PublishStepResp{}
 	for _, app := range publishApps {
 		projectApp, _ := pm.modelProject.GetProjectApp(app.ProjectAppID)
+		scmApp, err := pm.modelApp.GetScmAppByID(projectApp.ScmID)
+		if err != nil {
+			log.Log.Error("get scm app by id %v error: %s", projectApp.ScmID, err.Error())
+			continue
+		}
 		branchHistoryList, _ := pm.modelApp.GetAppBranches(app.ProjectAppID)
 		branchItems := []string{}
 		for _, branch := range branchHistoryList {
@@ -673,10 +704,10 @@ func (pm *PipelineManager) getPublishStepPreBranchList(projectID, publishID, sta
 		}
 		appInfo := &PublishStepResp{
 			BranchName:        app.BranchName,
-			AppName:           projectApp.Name,
-			Language:          projectApp.Language,
+			AppName:           scmApp.Name,
+			Language:          scmApp.Language,
 			ProjectAppID:      app.ProjectAppID,
-			BuildPath:         projectApp.BuildPath,
+			BuildPath:         scmApp.BuildPath,
 			Type:              "app",
 			TargetBranch:      targetBranch,
 			CompileCommand:    app.CompileCommand,
@@ -754,9 +785,14 @@ func (pm *PipelineManager) getDeployStepAppImages(publishID int64) ([]*DeploySte
 			logs.Warn("project app id: %v not exist, err: %s", app.ProjectAppID, err.Error())
 			continue
 		}
+		scmApp, err := pm.modelApp.GetScmAppByID(projectApp.ScmID)
+		if err != nil {
+			logs.Warn("scm app id: %v not exist, err: %s", projectApp.ScmID, err.Error())
+			continue
+		}
 		item := &DeployStepAppRsp{
 			ProjectAppID: projectApp.ID,
-			Name:         projectApp.Name,
+			Name:         scmApp.Name,
 			Type:         "app",
 		}
 		rsp = append(rsp, item)
@@ -845,7 +881,12 @@ func (pm *PipelineManager) checkApparrange(projectID int64, apps []int64, stage 
 		_, err := pm.appHandler.GetRealArrange(modelApp.ID, arrangeEnvID)
 		if err != nil {
 			log.Log.Error("get project app id: %v arrnage occur error: %s", modelApp.ID, err)
-			nilArranged = append(nilArranged, modelApp.Name)
+			scmApp, err := pm.modelApp.GetScmAppByID(modelApp.ScmID)
+			if err != nil {
+				log.Log.Warn("get scm app error: %s", err.Error())
+				continue
+			}
+			nilArranged = append(nilArranged, scmApp.Name)
 		}
 	}
 	if len(nilArranged) > 0 {
@@ -874,10 +915,15 @@ func (pm *PipelineManager) aggregateAppsParamsForBuild(apps []*RunBuildAppReq, s
 		if err != nil {
 			log.Log.Error("get proejct modelapp occur error: %s", err)
 		}
-
+		scmApp, err := pm.modelApp.GetScmAppByID(projectApp.ScmID)
+		if err != nil {
+			logs.Warn("get scm app error: %s", err.Error())
+			continue
+		}
 		releaseBranch := "None"
 		allParm := &RunBuildAllParms{
-			ProjectApp:     projectApp,
+			ProjectID:      projectApp.ProjectID,
+			ScmApp:         scmApp,
 			RunBuildAppReq: app,
 			Release:        releaseBranch,
 		}
@@ -896,57 +942,35 @@ func (pm *PipelineManager) aggregateAppsParamsForDeploy(publishID, stageID int64
 			log.Log.Error("get gitmodelapp occur error: %s", err)
 		}
 
+		scmApp, err := pm.modelApp.GetScmAppByID(projectApp.ScmID)
+		if err != nil {
+			log.Log.Error("get scmapp error: %s", err.Error())
+		}
+
 		arrange, err := pm.appHandler.GetRealArrange(app.ProjectAppID, stageID)
 		if err != nil {
 			log.Log.Error("get app id: %v  env id: %v real arrange, occur error: %s", app.ProjectAppID, stageID, err.Error())
 			continue
 		}
 
-		imageMapping, err := pm.modelAppArrange.GetAppImageMappingByArrangeIDAndProjectAppID(arrange.ID, app.ProjectAppID)
+		publishApp, err := pm.modelPublish.GetPublishAppByPublishIDAndAppID(publishID, app.ProjectAppID)
 		if err != nil {
-			log.Log.Error("get imagemapping error: %s", err.Error())
+			logs.Warn("when get publish app by publishid/appid occur error:%s, did not update app arrange image info", err.Error())
 			continue
 		}
 
-		newImageAddr := imageMapping.Image
-		switch imageMapping.ImageTagType {
-		case models.SystemDefaultTag:
-			publishApp, err := pm.modelPublish.GetPublishAppByPublishIDAndAppID(publishID, app.ProjectAppID)
-			if err != nil {
-				logs.Warn("when get publish app by publishid/appid occur error:%s, did not update app arrange image info", err.Error())
-				continue
-			}
-			imageTag, err := pm.getAppCodeCommitByBranch(app.ProjectAppID, publishApp.BranchName)
-			if err != nil {
-				logs.Warn("when get app code commit by branch error: %s, did not update app arrange image info", err.Error())
-				continue
-			}
-
-			originImageSplit := strings.Split(imageMapping.Image, ":")
-			imageStr := imageMapping.Image
-			if len(originImageSplit) == 2 {
-				imageStr = originImageSplit[0]
-			}
-			newImageAddr = fmt.Sprintf("%s:%s", imageStr, imageTag)
-		case models.LatestTag:
-			originImageSplit := strings.Split(imageMapping.Image, ":")
-			imageStr := imageMapping.Image
-			if len(originImageSplit) == 2 {
-				imageStr = originImageSplit[0]
-			}
-			newImageAddr = fmt.Sprintf("%s:%s", imageStr, "latest")
-		case models.OriginTag:
-			log.Log.Debug("image tag use from yaml, no need replace")
+		newImageAddr, _, err := pm.generateImageAddr(arrange.ID, app.ProjectAppID, publishApp.BranchName)
+		if err != nil {
+			continue
 		}
-
 		log.Log.Debug("imageAddr: %s", newImageAddr)
 		allParm := &RunDeployAllParms{
-			ProjectApp:      projectApp,
+			ProjectID:       projectApp.ProjectID,
+			ScmApp:          scmApp,
 			RunDeployAppReq: app,
 			ImageAddr:       newImageAddr,
 		}
 		allParms = append(allParms, allParm)
-
 	}
 	return allParms, nil
 }
@@ -1015,17 +1039,17 @@ func (pm *PipelineManager) renderAppBuildItemsForBuild(projectID, stageID, publi
 	for _, app := range allParms {
 		item := &jenkins.StepItem{}
 		item.Name = app.Name
-		// Default containername is jnlp
-		item.ContainerName = strings.ToLower(app.Name)
+		// Default containername is constant.DefaultContainerName(jnlp)
+		item.ContainerName = constant.DefaultContainerName
 		command := fmt.Sprintf("sh 'echo app:%v language:%v, did not defined compile command, skip compile'", app.Name, app.Language)
 		customCompileCommand := app.RunBuildAppReq.CompileCommand
 
 		appPath := pm.generateAppPth(stageID, projectID, ciConfig[3], app)
 		appRootPath := appPath
 		if app.CompileEnvID == 0 {
-			item.ContainerName = "jnlp"
 			command = fmt.Sprintf("sh 'echo app:%v language:%v, did not setup compile env,skip compile...'", app.Name, app.Language)
 		} else if len(customCompileCommand) > 0 {
+			item.ContainerName = strings.ToLower(app.Name)
 			command = fmt.Sprintf("sh 'cd %v; %v'", appRootPath, customCompileCommand)
 		}
 		item.Command = command
@@ -1059,44 +1083,10 @@ func (pm *PipelineManager) renderAppImageitemsForBuild(projectID, publishID, sta
 			continue
 		}
 
-		imageMapping, err := pm.modelAppArrange.GetAppImageMappingByArrangeIDAndProjectAppID(arrange.ID, app.ProjectAppID)
+		imageURL, _, err := pm.generateImageAddr(arrange.ID, app.ProjectAppID, app.Branch)
 		if err != nil {
-			log.Log.Error("get imagemapping error: %s", err.Error())
 			continue
 		}
-
-		newImageAddr := imageMapping.Image
-		switch imageMapping.ImageTagType {
-		case models.SystemDefaultTag:
-			publishApp, err := pm.modelPublish.GetPublishAppByPublishIDAndAppID(publishID, app.ProjectAppID)
-			if err != nil {
-				logs.Warn("when get publish app by publishid/appid occur error:%s, did not update app arrange image info", err.Error())
-				continue
-			}
-			imageTag, err := pm.getAppCodeCommitByBranch(app.ProjectAppID, publishApp.BranchName)
-			if err != nil {
-				logs.Warn("when get app code commit by branch error: %s, did not update app arrange image info", err.Error())
-				continue
-			}
-
-			originImageSplit := strings.Split(imageMapping.Image, ":")
-			imageStr := imageMapping.Image
-			if len(originImageSplit) == 2 {
-				imageStr = originImageSplit[0]
-			}
-			newImageAddr = fmt.Sprintf("%s:%s", imageStr, imageTag)
-		case models.LatestTag:
-			originImageSplit := strings.Split(imageMapping.Image, ":")
-			imageStr := imageMapping.Image
-			if len(originImageSplit) == 2 {
-				imageStr = originImageSplit[0]
-			}
-			newImageAddr = fmt.Sprintf("%s:%s", imageStr, "latest")
-		case models.OriginTag:
-			log.Log.Debug("image tag use from yaml, no need replace")
-		}
-
-		imageURL := newImageAddr
 		dockerfile := app.Dockerfile
 		if dockerfile == "" {
 			dockerfile = "Dockerfile"

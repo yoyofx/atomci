@@ -14,21 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package mycasbin
+package pipelinemgr
 
-// CasbinRule ..
-type CasbinRule struct {
-	ID    uint   `gorm:"primaryKey;autoIncrement"`
-	Ptype string `gorm:"size:512"`
-	V0    string `gorm:"size:512"`
-	V1    string `gorm:"size:512"`
-	V2    string `gorm:"size:512"`
-	V3    string `gorm:"size:512"`
-	V4    string `gorm:"size:512"`
-	V5    string `gorm:"size:512"`
-}
+import (
+	"testing"
 
-// TableName ..
-func (CasbinRule) TableName() string {
-	return "casbin_rule"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestGetStatus(t *testing.T) {
+	t.Run("jenkins", func(t *testing.T) {
+		assert.Nil(t, nil)
+	})
 }

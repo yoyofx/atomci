@@ -17,6 +17,12 @@ limitations under the License.
 package api
 
 import (
+	"fmt"
+	"reflect"
+
+	"github.com/go-atomci/atomci/constant"
+
+	"github.com/go-atomci/atomci/internal/core/apps"
 	"github.com/go-atomci/atomci/internal/core/settings"
 	"github.com/go-atomci/atomci/internal/middleware/log"
 )
@@ -28,7 +34,7 @@ type IntegrateController struct {
 
 func (p *IntegrateController) GetClusterIntegrateSettings() {
 	pm := settings.NewSettingManager()
-	rsp, err := pm.GetIntegrateSettings("kubernetes")
+	rsp, err := pm.GetIntegrateSettings([]string{constant.IntegrateKubernetes})
 	if err != nil {
 		p.HandleInternalServerError(err.Error())
 		log.Log.Error("Get integrate settings occur error: %s", err.Error())
@@ -41,7 +47,7 @@ func (p *IntegrateController) GetClusterIntegrateSettings() {
 // GetIntegrateSettings ..
 func (p *IntegrateController) GetIntegrateSettings() {
 	pm := settings.NewSettingManager()
-	rsp, err := pm.GetIntegrateSettings("")
+	rsp, err := pm.GetIntegrateSettings(constant.Integratetypes)
 	if err != nil {
 		p.HandleInternalServerError(err.Error())
 		log.Log.Error("Get integrate settings occur error: %s", err.Error())
@@ -55,7 +61,48 @@ func (p *IntegrateController) GetIntegrateSettings() {
 func (p *IntegrateController) GetIntegrateSettingsByPagination() {
 	filterQuery := p.GetFilterQuery()
 	pm := settings.NewSettingManager()
-	rsp, err := pm.GetIntegrateSettingsByPagination(filterQuery)
+	rsp, err := pm.GetIntegrateSettingsByPagination(filterQuery, constant.Integratetypes)
+	if err != nil {
+		p.HandleInternalServerError(err.Error())
+		log.Log.Error("Get integrate settings occur error: %s", err.Error())
+		return
+	}
+	p.Data["json"] = NewResult(true, rsp, "")
+	p.ServeJSON()
+}
+
+func (p *IntegrateController) GetSCMIntegrateSettings() {
+	pm := settings.NewSettingManager()
+	rsp, err := pm.GetIntegrateSettings(constant.ScmIntegratetypes)
+	if err != nil {
+		p.HandleInternalServerError(err.Error())
+		log.Log.Error("Get integrate settings occur error: %s", err.Error())
+		return
+	}
+	// for security hidden config content
+	for _, item := range rsp {
+		//用于前端生成完成仓库地址
+		item.IntegrateSettingReq.Config = settings.BaseConfig{
+			URL: getBaseConfigUrl(item.IntegrateSettingReq.Config),
+		}
+	}
+	p.Data["json"] = NewResult(true, rsp, "")
+	p.ServeJSON()
+}
+
+// 获取仓库域名
+// TODO现在用反射获取，有更好方法再替换
+func getBaseConfigUrl(config interface{}) string {
+	immutable := reflect.ValueOf(config).Elem()
+	url := immutable.FieldByName("URL").String()
+	return url
+}
+
+// GetSCMIntegrateSettingsByPagination ..
+func (p *IntegrateController) GetSCMIntegrateSettingsByPagination() {
+	filterQuery := p.GetFilterQuery()
+	pm := settings.NewSettingManager()
+	rsp, err := pm.GetIntegrateSettingsByPagination(filterQuery, constant.ScmIntegratetypes)
 	if err != nil {
 		p.HandleInternalServerError(err.Error())
 		log.Log.Error("Get integrate settings occur error: %s", err.Error())
@@ -78,6 +125,33 @@ func (p *IntegrateController) CreateIntegrateSetting() {
 		return
 	}
 	p.Data["json"] = NewResult(true, nil, "")
+	p.ServeJSON()
+}
+
+// VerifyRepoConnetion
+// 验证仓库源是否能连通
+func (p *IntegrateController) VerifyRepoConnetion() {
+	request := settings.IntegrateSettingReq{}
+	p.DecodeJSONReq(&request)
+	url := ""
+	token := ""
+	if m, ok := request.Config.(map[string]interface{}); ok {
+		if v, has := m["url"]; has {
+			url = fmt.Sprintf("%s", v)
+		}
+		if v, has := m["token"]; has {
+			token = fmt.Sprintf("%s", v)
+		}
+	}
+
+	app := apps.NewAppManager()
+	err := app.VerifyRepoConnetion(request.Type, url, token)
+	if err != nil {
+		p.HandleInternalServerError(err.Error())
+		log.Log.Error("verify repo connetion occur error: %s", err.Error())
+		return
+	}
+	p.Data["json"] = NewResult(true, "", "")
 	p.ServeJSON()
 }
 
